@@ -11,14 +11,15 @@ const MODEL = 'claude-sonnet-5'
  * internals — callers don't change.
  *
  * @param {Array<{role: 'user'|'assistant', content: string}>} messages - the entire conversation history so far, including the user's message
- * @returns {Promise<string>} - the assistant's reply text
+ * @param {Array<{name: string, description: string, input_schema: {type: 'object', properties: {}}}>} tools - the tools the assistant can use to help the user
+ * @returns {Promise<Message>} - the assistant's reply text
  */
-export async function sendMessage(messages) {
-  const response = await client.messages.create({
-    model: MODEL,
+export async function sendMessage(messages, tools) {
+  return client.messages.create({
     max_tokens: 1024,
-    messages: messages
+    messages: messages,
+    model: MODEL,
+    tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+    tools: tools
   })
-
-  return response.content[0].text
 }
