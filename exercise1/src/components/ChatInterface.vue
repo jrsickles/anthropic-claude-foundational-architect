@@ -1,7 +1,7 @@
 <script setup>
 import { useChat } from '../composables/useChat.js'
 
-const {userInput, lastResponse, stateJson, submit, clearChat} = useChat()
+const {userInput, lastResponse, stateJson, payloadJson, submit, clearChat, error} = useChat()
 </script>
 
 <template>
@@ -21,6 +21,11 @@ const {userInput, lastResponse, stateJson, submit, clearChat} = useChat()
       <button class="clear" @click="clearChat">Clear</button>
     </div>
 
+    <div v-if="error">
+      <label for="errorMsg">Error</label>
+      <p id="errorMsg" class="error-box">{{ error }}</p>
+    </div>
+
     <div>
       <label for="response">Response</label>
       <p id="response" class="response-box">{{ lastResponse || '—' }}</p>
@@ -29,6 +34,11 @@ const {userInput, lastResponse, stateJson, submit, clearChat} = useChat()
     <div>
       <label for="stateBlock">Chat State (JSON)</label>
       <pre id="stateBlock"><code>{{ stateJson }}</code></pre>
+    </div>
+
+    <div>
+      <label for="payloadBlock">API Payload (JSON)</label>
+      <pre id="payloadBlock"><code>{{ payloadJson }}</code></pre>
     </div>
   </div>
 </template>
@@ -88,6 +98,16 @@ textarea#userInput {
   margin: 0;
 }
 
+.error-box {
+  background: #2a1414;
+  color: #ff8a8a;
+  border: 1px solid #7a2d2d;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin: 0;
+}
+
 .buttons {
   display: flex;
   gap: 10px;
@@ -116,7 +136,8 @@ button.clear {
   color: #e0e0e0;
 }
 
-pre#stateBlock {
+pre#stateBlock,
+pre#payloadBlock {
   background: #111;
   border: 1px solid #333;
   border-radius: 6px;

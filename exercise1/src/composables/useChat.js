@@ -15,6 +15,7 @@ export function useChat() {
   const messages = ref([])
   const status = ref('idle') // idle | loading | success | error
   const error = ref(null)
+  const payload = ref([])
 
   async function submit() {
     const text = userInput.value.trim()
@@ -23,22 +24,45 @@ export function useChat() {
     status.value = 'loading'
     error.value = null
 
-    const userMsg = { role: 'user', content: text, timestamp: new Date().toISOString() }
+    const userMsg = {
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+      status: 'pending',
+      response: null,
+    }
     messages.value.push(userMsg)
     userInput.value = ''
 
     try {
-      const reply = await sendMessage(
-          messages.value.map(({ role, content }) => ({ role, content }))
-      )
+      payload.value = messages.value
+          .filter(({status}) => status !== 'failed')
+          .map(({ role, content }) => ({role, content}))
+      const reply = await sendMessage(payload.value)
 
-      const assistantMsg = { role: 'assistant', content: reply, timestamp: new Date().toISOString() }
+      const assistantMsg = {
+        role: 'assistant',
+        content: reply,
+        timestamp: new Date().toISOString(),
+        status: 'sent',
+        response: null
+      }
+
       messages.value.push(assistantMsg)
       lastResponse.value = reply
+      // update as successful
       status.value = 'success'
+      userMsg.status = 'sent'
     } catch (e) {
-      error.value = e.message || 'Unknown error'
+      error.value = {
+        status: e.status,
+        type: e.error?.error?.type,
+        message: e.error?.error?.message || e.message
+      }
+      // update as error/failed and add the specific error message
       status.value = 'error'
+      userMsg.response = e.error
+      userMsg.status = 'failed'
     }
   }
 
@@ -48,7 +72,12 @@ export function useChat() {
     messages.value = []
     status.value = 'idle'
     error.value = null
+    payload.value = []
   }
+
+  const payloadJson = computed(() => {
+    return JSON.stringify(payload.value, null, 2)
+  })
 
   const stateJson = computed(() => {
     return JSON.stringify(
@@ -70,6 +99,7 @@ export function useChat() {
     messages,
     status,
     error,
+    payloadJson,
     stateJson,
     submit,
     clearChat
