@@ -7,6 +7,11 @@
  * (as a last resort, not a first move) rather than differentiating it from
  * a sibling tool.
  */
+export function escalateToHumanHandler(input) {
+  // todo: mock the results
+  return 'escalating to a human agent'
+}
+/** @type {import('@anthropic-ai/sdk').Anthropic.Tool} */
 export const escalateToHumanTool = {
   name: 'escalate_to_human',
   description:

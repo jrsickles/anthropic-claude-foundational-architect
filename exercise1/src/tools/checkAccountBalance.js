@@ -7,6 +7,12 @@
  * of steering Claude to the correct one when a user's message is ambiguous
  * (e.g. "what's going on with my account?").
  */
+export function checkAccountBalanceHandler(input) {
+  // todo: mock the results
+  return 'account balance: $100'
+}
+
+/** @type {import('@anthropic-ai/sdk').Anthropic.Tool} */
 export const checkAccountBalanceTool = {
   name: 'check_account_balance',
   description:

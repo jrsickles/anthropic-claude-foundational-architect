@@ -6,6 +6,13 @@
  * uses to decide whether to call this tool at all, and to distinguish it
  * from other similarly named tools (e.g. checkAccountBalance).
  */
+
+export function checkOrderStatusHandler(input) {
+  // todo: mock the results
+  return 'customer order #123'
+}
+
+/** @type {import('@anthropic-ai/sdk').Anthropic.Tool} */
 export const checkOrderStatusTool = {
   name: 'check_order_status',
   description:

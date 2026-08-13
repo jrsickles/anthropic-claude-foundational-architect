@@ -7,6 +7,13 @@
  * account-specific) is its own disambiguation axis worth calling out
  * explicitly in the description.
  */
+
+export function searchHelpArticlesHandler(input) {
+  // todo: mock the results
+  return 'https://support.example.com/search?q=' + input.query
+}
+
+/** @type {import('@anthropic-ai/sdk').Anthropic.Tool} */
 export const searchHelpArticlesTool = {
   name: 'search_help_articles',
   description:
