@@ -29,15 +29,15 @@ export function useChat() {
       content: text,
       timestamp: new Date().toISOString(),
       status: 'pending',
-      response: null,
+      response: null
     }
     messages.value.push(userMsg)
     userInput.value = ''
 
     try {
       payload.value = messages.value
-          .filter(({status}) => status !== 'failed')
-          .map(({ role, content }) => ({role, content}))
+        .filter(({ status }) => status !== 'failed')
+        .map(({ role, content }) => ({ role, content }))
       const reply = await sendMessage(payload.value)
 
       const assistantMsg = {

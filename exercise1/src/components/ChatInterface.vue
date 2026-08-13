@@ -1,7 +1,7 @@
 <script setup>
 import { useChat } from '../composables/useChat.js'
 
-const {userInput, lastResponse, stateJson, payloadJson, submit, clearChat, error} = useChat()
+const { userInput, lastResponse, stateJson, payloadJson, submit, clearChat, error } = useChat()
 </script>
 
 <template>
@@ -17,7 +17,7 @@ const {userInput, lastResponse, stateJson, payloadJson, submit, clearChat, error
     </div>
 
     <div class="buttons">
-      <button class="submit" @click="submit" :disabled="!userInput.trim()">Submit</button>
+      <button class="submit" :disabled="!userInput.trim()" @click="submit">Submit</button>
       <button class="clear" @click="clearChat">Clear</button>
     </div>
 
