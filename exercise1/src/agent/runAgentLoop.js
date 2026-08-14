@@ -33,76 +33,74 @@ export async function runAgentLoop(messages, { onProgress } = {}) {
 
     const response = await sendMessage(workingMessages, tools)
 
-    if (response.stop_reason !== 'tool_use') {
+    if (response.stop_reason === 'end_turn') {
       const textBlock = response.content.find((block) => block.type === 'text')
 
-      workingMessages.push({
-        role: 'assistant',
-        content: response.content
-        // todo do we add timestamp and other things here, or in the calling function?
-      })
+      workingMessages.push({ role: 'assistant', content: response.content })
 
       return {
         text: textBlock?.text ?? '',
         messages: workingMessages,
         turns: turn
       }
-    }
-
-    // Claude wants to call one or more tools. Its turn (including the
-    // tool_use block(s)) must be echoed back verbatim so it can later
-    // correlate our tool_result(s) to the call(s) it made.
-    workingMessages.push({
-      role: 'assistant',
-      content: response.content
-      // todo do we add timestamp and other things here, or in the calling function?
-    })
-
-    const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
-
-    const toolResults = await Promise.all(
-      toolUseBlocks.map(async (block) => {
-        onProgress?.({ type: 'tool_call', turn, name: block.name, input: block.input })
-
-        const handler = toolHandlers[block.name]
-
-        if (!handler) {
-          onProgress?.({
-            type: 'tool_error',
-            turn,
-            name: block.name,
-            error: 'no handler registered'
-          })
-          return {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: `No handler is registered for tool "${block.name}".`,
-            is_error: true
-          }
-        }
-
-        try {
-          const result = await handler(block.input)
-          onProgress?.({ type: 'tool_result', turn, name: block.name, result })
-          return {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result)
-          }
-        } catch (e) {
-          const message = e?.message || 'Unknown tool error'
-          onProgress?.({ type: 'tool_error', turn, name: block.name, error: message })
-          return {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: message,
-            is_error: true
-          }
-        }
+    } else if (response.stop_reason === 'tool_use') {
+      // Claude wants to call one or more tools. Its turn (including the
+      // tool_use block(s)) must be echoed back verbatim so it can later
+      // correlate our tool_result(s) to the call(s) it made.
+      workingMessages.push({
+        role: 'assistant',
+        content: response.content
+        // todo do we add timestamp and other things here, or in the calling function?
       })
-    )
 
-    workingMessages.push({ role: 'user', content: toolResults })
+      const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
+
+      const toolResults = await Promise.all(
+        toolUseBlocks.map(async (block) => {
+          onProgress?.({ type: 'tool_call', turn, name: block.name, input: block.input })
+
+          const handler = toolHandlers[block.name]
+
+          if (!handler) {
+            onProgress?.({
+              type: 'tool_error',
+              turn,
+              name: block.name,
+              error: 'no handler registered'
+            })
+            return {
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: `No handler is registered for tool "${block.name}".`,
+              is_error: true
+            }
+          }
+
+          try {
+            const result = await handler(block.input)
+            onProgress?.({ type: 'tool_result', turn, name: block.name, result })
+            return {
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: typeof result === 'string' ? result : JSON.stringify(result)
+            }
+          } catch (e) {
+            const message = e?.message || 'Unknown tool error'
+            onProgress?.({ type: 'tool_error', turn, name: block.name, error: message })
+            return {
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: message,
+              is_error: true
+            }
+          }
+        })
+      )
+
+      workingMessages.push({ role: 'user', content: toolResults })
+    } else {
+      // todo handle other stop_reasons
+    }
   }
 
   // Turn cap reached without Claude reaching a final answer — this is
