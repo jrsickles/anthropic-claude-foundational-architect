@@ -1,7 +1,7 @@
 <script setup>
 import { useChat } from '../composables/useChat.js'
 
-const { userInput, lastResponse, stateJson, payloadJson, submit, clearChat, error } = useChat()
+const { userInput, responseString, stateJson, payloadJson, submit, clearChat, error } = useChat()
 </script>
 
 <template>
@@ -23,12 +23,12 @@ const { userInput, lastResponse, stateJson, payloadJson, submit, clearChat, erro
 
     <div v-if="error">
       <label for="errorMsg">Error</label>
-      <p id="errorMsg" class="error-box">{{ error }}</p>
+      <p id="errorMsg" class="error-box">{{ error.value.message }}</p>
     </div>
 
     <div>
       <label for="response">Response</label>
-      <p id="response" class="response-box">{{ lastResponse || '—' }}</p>
+      <p id="response" class="response-box">{{ responseString || '—' }}</p>
     </div>
 
     <div>
