@@ -1,5 +1,6 @@
 import { sendMessage } from '../api/sendMessage.js'
 import { tools, toolHandlers } from '../tools/index.js'
+import { ToolError } from '../tools/toolError.js'
 
 // Hard cap on how many times we'll go back to Claude within a single
 // runAgentLoop() call. This is the escalation trigger for "the agent seems
@@ -86,6 +87,33 @@ export async function runAgentLoop(messages, { onProgress } = {}) {
             }
           } catch (e) {
             const message = e?.message || 'Unknown tool error'
+
+            if (e instanceof ToolError) {
+              onProgress?.({
+                type: 'tool_error',
+                turn,
+                name: block.name,
+                error: message,
+                errorCategory: e.errorCategory,
+                isRetryable: e.isRetryable
+              })
+              return {
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: JSON.stringify({
+                  error: true,
+                  errorCategory: e.errorCategory,
+                  isRetryable: e.isRetryable,
+                  message
+                }),
+                is_error: true
+              }
+            }
+
+            // Not a ToolError — an unexpected failure (a bug in the handler,
+            // a thrown value that isn't an Error, etc). Claude still needs
+            // to know it failed, but we have no category/retryability info
+            // to give it, so this falls back to a flat message.
             onProgress?.({ type: 'tool_error', turn, name: block.name, error: message })
             return {
               type: 'tool_result',

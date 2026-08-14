@@ -7,9 +7,43 @@
  * from other similarly named tools (e.g. checkAccountBalance).
  */
 
+import { ToolError } from './toolError.js'
+
+/**
+ * Mock handler. Real order lookups aren't implemented — this exists to
+ * exercise the tool-calling loop and structured error handling.
+ *
+ * Sentinel order_id values trigger each error category on purpose, so the
+ * agent's retry/explain/escalate behavior can be tested end to end without
+ * a real backend:
+ *   'FAIL-TRANSIENT'  -> simulates a flaky downstream service (retryable)
+ *   'FAIL-VALIDATION' -> simulates a bad/unrecognized order ID (not retryable)
+ *   'FAIL-PERMISSION' -> simulates an order outside this account's access (not retryable)
+ */
 export function checkOrderStatusHandler(input) {
-  // todo: mock the results
-  return 'customer order #123'
+  if (input.order_id === 'FAIL-TRANSIENT') {
+    throw new ToolError('The order lookup service timed out. Please try again.', {
+      errorCategory: 'transient',
+      isRetryable: true
+    })
+  }
+
+  if (input.order_id === 'FAIL-VALIDATION') {
+    throw new ToolError(`No order found with ID "${input.order_id}".`, {
+      errorCategory: 'validation',
+      isRetryable: false
+    })
+  }
+
+  if (input.order_id === 'FAIL-PERMISSION') {
+    throw new ToolError('You do not have permission to view this order.', {
+      errorCategory: 'permission',
+      isRetryable: false
+    })
+  }
+
+  // todo: mock realistic results per order_id
+  return 'Due to be delivered on Thursday.'
 }
 
 /** @type {import('@anthropic-ai/sdk').Anthropic.Tool} */
