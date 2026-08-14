@@ -2,7 +2,7 @@ import { client } from './client.js'
 
 const MODEL = 'claude-sonnet-5'
 
-const systemPrompt =
+const SYSTEMPROMPT =
   'You are a customer support agent with access to tools for looking up order status, checking account balances, searching help articles, and escalating to a human agent. ' +
   'When a tool call fails, the tool_result will contain an error object with three fields: errorCategory ("transient", "validation", or "permission"), isRetryable (true or false), and a human-readable message. ' +
   'If isRetryable is true, you may retry the same tool call once. If it fails again, stop retrying and either try a different approach or explain the issue to the user — do not retry more than once for the same call. ' +
@@ -26,7 +26,7 @@ export async function sendMessage(messages, tools) {
     max_tokens: 1024,
     messages: messages,
     model: MODEL,
-    system: systemPrompt,
+    system: SYSTEMPROMPT,
     tool_choice: { type: 'auto', disable_parallel_tool_use: false },
     tools: tools
   })
