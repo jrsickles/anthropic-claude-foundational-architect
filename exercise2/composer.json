@@ -12,6 +12,11 @@
             "Api\\": "src/api/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Api\\Tests\\": "src/api/Tests/"
+        }
+    },
     "config": {
         "sort-packages": true
     }

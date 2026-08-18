@@ -10,13 +10,16 @@ namespace Api;
  */
 final class InMemoryUserRepository implements UserRepositoryInterface
 {
+    private int $nextId;
+
     /**
      * @param array<int, array<string, mixed>> $users Users keyed by id.
      */
-    public function __construct(private readonly array $users = [
+    public function __construct(private array $users = [
         1 => ['id' => 1, 'name' => 'Ada Lovelace', 'email' => 'ada@example.com'],
         2 => ['id' => 2, 'name' => 'Alan Turing', 'email' => 'alan@example.com'],
     ]) {
+        $this->nextId = $this->users === [] ? 1 : max(array_keys($this->users)) + 1;
     }
 
     /**
@@ -26,5 +29,18 @@ final class InMemoryUserRepository implements UserRepositoryInterface
     public function find(int $id): ?array
     {
         return $this->users[$id] ?? null;
+    }
+
+    /**
+     * @param array{name: string, email: string} $data The user data to store.
+     * @return array<string, mixed> The created user record, including its id.
+     */
+    public function create(array $data): array
+    {
+        $id = $this->nextId++;
+        $user = ['id' => $id, 'name' => $data['name'], 'email' => $data['email']];
+        $this->users[$id] = $user;
+
+        return $user;
     }
 }
