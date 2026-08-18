@@ -1,12 +1,14 @@
 import { checkAccountBalanceHandler, checkAccountBalanceTool } from './checkAccountBalance.js'
 import { checkOrderStatusHandler, checkOrderStatusTool } from './checkOrderStatus.js'
 import { escalateToHumanHandler, escalateToHumanTool } from './escalateToHuman.js'
+import { issueRefundHandler, issueRefundTool } from './issueRefund.js'
 import { searchHelpArticlesHandler, searchHelpArticlesTool } from './searchHelpArticles.js'
 
 export const toolHandlers = {
   [checkAccountBalanceTool.name]: checkAccountBalanceHandler,
   [checkOrderStatusTool.name]: checkOrderStatusHandler,
   [escalateToHumanTool.name]: escalateToHumanHandler,
+  [issueRefundTool.name]: issueRefundHandler,
   [searchHelpArticlesTool.name]: searchHelpArticlesHandler
 }
 
@@ -19,5 +21,6 @@ export const tools = [
   checkAccountBalanceTool,
   checkOrderStatusTool,
   escalateToHumanTool,
+  issueRefundTool,
   searchHelpArticlesTool
 ]

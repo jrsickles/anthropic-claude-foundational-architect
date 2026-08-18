@@ -1,6 +1,8 @@
+import { runToolHandler } from '../agent/runToolHandler.js'
 import { sendMessage } from '../api/sendMessage.js'
+import { escalateToHumanTool } from '../tools/escalateToHuman.js'
 import { tools, toolHandlers } from '../tools/index.js'
-import { ToolError } from '../tools/toolError.js'
+import { REFUND_THRESHOLD } from '../tools/issueRefund.js'
 
 // Hard cap on how many times we'll go back to Claude within a single
 // runAgentLoop() call. This is the escalation trigger for "the agent seems
@@ -46,13 +48,9 @@ export async function runAgentLoop(messages, { onProgress } = {}) {
       }
     } else if (response.stop_reason === 'tool_use') {
       // Claude wants to call one or more tools. Its turn (including the
-      // tool_use block(s)) must be echoed back verbatim so it can later
-      // correlate our tool_result(s) to the call(s) it made.
-      workingMessages.push({
-        role: 'assistant',
-        content: response.content
-        // todo do we add timestamp and other things here, or in the calling function?
-      })
+      // tool_use blocks) must be echoed back verbatim so it can later
+      // correlate our tool_results to the calls it made.
+      workingMessages.push({ role: 'assistant', content: response.content })
 
       const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use')
 
@@ -60,7 +58,7 @@ export async function runAgentLoop(messages, { onProgress } = {}) {
         toolUseBlocks.map(async (block) => {
           onProgress?.({ type: 'tool_call', turn, name: block.name, input: block.input })
 
-          const handler = toolHandlers[block.name]
+          let handler = toolHandlers[block.name]
 
           if (!handler) {
             onProgress?.({
@@ -77,51 +75,36 @@ export async function runAgentLoop(messages, { onProgress } = {}) {
             }
           }
 
-          try {
-            const result = await handler(block.input)
-            onProgress?.({ type: 'tool_result', turn, name: block.name, result })
-            return {
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: typeof result === 'string' ? result : JSON.stringify(result)
-            }
-          } catch (e) {
-            const message = e?.message || 'Unknown tool error'
+          if (block.name === 'issue_refund' && block.input.amount > REFUND_THRESHOLD) {
+            // in this handler, we do not want to allow or even ask the agent to issue a refund.
+            // we want to, instead, immediately invoke the human agent to handle the refund.
+            // we will log the progress and immediately change to the escalate_to_human handler.
+            onProgress?.({
+              type: 'business_rule',
+              turn,
+              name: block.name,
+              result:
+                'Refund amount exceeds threshold. Escalate this chat to a human for further assistance.'
+            })
 
-            if (e instanceof ToolError) {
-              onProgress?.({
-                type: 'tool_error',
-                turn,
-                name: block.name,
-                error: message,
-                errorCategory: e.errorCategory,
-                isRetryable: e.isRetryable
-              })
-              return {
-                type: 'tool_result',
-                tool_use_id: block.id,
-                content: JSON.stringify({
-                  error: true,
-                  errorCategory: e.errorCategory,
-                  isRetryable: e.isRetryable,
-                  message
-                }),
-                is_error: true
+            const escalateBlock = {
+              type: 'tool_use',
+              id: block.id,
+              name: escalateToHumanTool.name,
+              input: {
+                reason: 'sensitive',
+                summary: `Refund of $${block.input.amount} for order ${block.input.order_id} exceeds the $${REFUND_THRESHOLD} auto-approval threshold.`
               }
             }
 
-            // Not a ToolError — an unexpected failure (a bug in the handler,
-            // a thrown value that isn't an Error, etc). Claude still needs
-            // to know it failed, but we have no category/retryability info
-            // to give it, so this falls back to a flat message.
-            onProgress?.({ type: 'tool_error', turn, name: block.name, error: message })
-            return {
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: message,
-              is_error: true
-            }
+            // trigger the `escalate to human` handler instead of the `refund` handler
+            handler = toolHandlers[escalateToHumanTool.name]
+            const result = await runToolHandler(handler, escalateBlock, turn, onProgress)
+            result.content = `Escalated to human agent for refund of $${block.input.amount} for order ${block.input.order_id}, which exceeds the $${REFUND_THRESHOLD} auto-approval threshold. Please wait for a human agent to handle this request. Thank you for your understanding.`
+            return result
           }
+
+          return await runToolHandler(handler, block, turn, onProgress)
         })
       )
 

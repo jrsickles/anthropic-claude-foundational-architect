@@ -77,8 +77,15 @@ export function useChat() {
     payload.value = []
   }
 
+  /**
+   *
+   * @param input
+   */
   function appendLastResponse(input) {
     switch (input.type) {
+      case 'business_rule':
+        lastResponse.value.push(`Business Rule: ${input.result}.`)
+        break
       case 'max_turns_exceeded':
         lastResponse.value.push(`Max turns exceeded after ${input.turn} turns.`)
         break
