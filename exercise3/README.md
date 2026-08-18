@@ -193,6 +193,117 @@ outcome, since baseline instruction-following is weaker there and leaves
 more room for examples to move the needle. Not tested here — noted as a
 possible follow-up rather than assumed.
 
+## Step 4 — Batch processing strategy (100 documents)
+
+Built and verified against a scripted mock of the Messages Batches API
+surface (`client.messages.batches.create/retrieve/results`), not the real
+API — deterministic, free, and doesn't require actually waiting on a
+(possibly 24-hour) real batch window. The mock is interface-compatible with
+the real SDK on purpose (see `REAL_USAGE_NOTES` at the bottom of
+`batchPipeline.mjs`): swapping in `new Anthropic({apiKey}).messages.batches`
+is a one-line change, not a rewrite.
+
+**Document mix (100, seeded/reproducible via `batchDocuments.mjs`):** 89
+normal reviews, 4 deliberately oversized documents, 2 empty/whitespace
+documents, 1 document that simulates a `result.type: "expired"` result
+(batch hit its 24h window before reaching it) on first submission, 1
+document that simulates `result.type: "canceled"` (never recovers — see
+below), and 3 documents that fail with a transient error the first time and
+succeed unchanged on resubmission.
+
+**Failure classification by `custom_id`** (`batchErrorClassifier.mjs`) —
+three remediation paths, determined from the batch result's error type/message
+rather than assumed from context:
+
+- **Transient** (`overloaded_error`, etc.) → resubmit unchanged.
+- **Oversized** (`invalid_request_error` matching "prompt is too long") →
+  chunk (`chunking.mjs`, paragraph/sentence-boundary aware) and resubmit
+  each chunk under a derived `custom_id` (`review-092::chunk1`, etc.), then
+  merge.
+- **Unfixable** (empty/non-empty-content rejection, or any other
+  `invalid_request_error`) → flagged for human review, never resubmitted.
+  An empty document is a genuine dead end — no amount of retrying produces
+  content that was never there, the same lesson as step 1/2's fabrication
+  finding but at the batch-request level instead of the field level.
+
+**Merge policy for chunked documents:** first non-null value per field wins
+across a document's chunks, but any field where chunks *disagree* is
+recorded in a `conflicts` list rather than silently resolved — because a
+disagreement means one chunk saw information the other didn't (or
+mis-classified something), and picking one value silently could be actively
+wrong rather than merely uncertain.
+
+**SLA accounting** (`slaTracker.mjs`) — target: 4 hours. Important framing:
+the Batches API's own guarantee is completion within 24 hours, not any
+shorter window, so a tighter business SLA is really a promise about the
+*pipeline's* design, not the Batches API alone. Round 1 and round 2 are
+sequential (round 2 can't start until round 1's failures are known);
+before submitting round 2, the pipeline checks the remaining time budget
+against a conservative estimate of how long another batch round-trip might
+take (120 min), and falls back to the **synchronous** Messages API for
+round 2 if a second batch round-trip wouldn't plausibly fit — more
+expensive per request, but the only way to protect a tight SLA once one
+batch round has already used up most of it.
+
+### Verification (mock run, `node batchRunner.mjs`)
+
+- **Round 1**: 89 succeeded, 4 transient, 4 oversized, 3 unfixable, in a
+  simulated 2h 45m (deliberately long, to eat most of the 4h budget and
+  force the round-2 decision to actually matter).
+- **Round 2 decision**: ~1h 15m of budget remained, less than the 120-min
+  assumed batch round-trip cost, so the pipeline correctly chose the
+  **synchronous fallback** (24 requests: 4 transient retries + 20 chunk
+  requests from the 4 oversized documents) instead of blindly submitting
+  another batch. Had it used another batch instead (~130 simulated
+  minutes), total time would have landed around 4h 55m — a real SLA
+  breach. The fallback kept the actual total at 2h 46m, comfortably inside
+  the 4h target (margin +1h 14m).
+- **Merge conflicts**: all 4 chunked documents correctly flagged a
+  `defect_type` conflict — `"none"` from the chunk that only saw the
+  product/rating, `"functionality"` from the chunk containing the buried
+  defect sentence ("app pairing stopped working"). This is the merge logic
+  working as intended: silently taking the first chunk's `"none"` would
+  have been actively wrong, not just uncertain, so it surfaces as a flagged
+  conflict instead.
+- **Final tallies**: 97/100 successfully extracted, 3/100 (the empty,
+  whitespace-only, and canceled documents) permanently unfixable and
+  routed to human review, never resubmitted.
+
+Two bugs caught and fixed before/during delivery:
+
+1. The first draft of the oversized test documents' filler text included
+   the words "packaging" and "box" (as in "thoughts on the packaging... the
+   box it came in"), which falsely matched the `packaging` defect-keyword
+   regex in every repeated filler paragraph and masked the `defect_type`
+   conflict the test was built to demonstrate — every merged document
+   showed a clean, conflict-free `"packaging"` result that looked plausible
+   but wasn't actually exercising the interesting code path. Caught by
+   checking for the expected `CONFLICTS` output rather than assuming a
+   clean report meant success.
+2. The first draft of `mockBatchClient.mjs` was written from training
+   knowledge of the Batches API rather than a live doc check, and got two
+   things wrong: it invented a `request_counts: { total }` field that
+   doesn't exist on the real API (the real shape is per-status —
+   `{processing, succeeded, errored, canceled, expired}`), and its result
+   classification only handled two result types (`succeeded`/`errored`),
+   missing that the real API has four (`succeeded`, `errored`, `canceled`,
+   `expired`) — the latter two carry no `error` object at all, which the
+   original `batchErrorClassifier.mjs` would have mishandled. Caught when
+   asked directly what the mock was based on; fixed by fetching
+   `https://platform.claude.com/docs/en/build-with-claude/batch-processing`
+   live and correcting `request_counts`, adding explicit `"canceled"`/
+   `"expired"` handling to `classifyBatchError`, and adding one document of
+   each kind (`review-096` expired, `review-097` canceled) to
+   `batchDocuments.mjs` so both branches are actually exercised by a run
+   instead of just being reachable-in-theory dead code. Both fixes were
+   verified by a dry run before being sent, and the live run's output
+   matched the dry run exactly. Lesson: for anything API-shape-specific,
+   verify against current docs before writing the mock, not after being
+   asked to justify it — this whole correction cycle was avoidable with a
+   docs check up front, and the same "verify, don't assume" principle used
+   for extraction test data throughout this exercise applies just as much
+   to how the exercise's own tooling is built.
+
 ## Files
 
 | File | Purpose |
@@ -205,7 +316,20 @@ possible follow-up rather than assumed.
 | `validationLoop.test.mjs` | Deterministic mock-client test of the retry loop's classification logic |
 | `fewShotExamples.mjs` | Few-shot example turns (labeled/bulleted + buried-facts formats) |
 | `comparisonRunner.mjs` | Runs `structuralVarietyDocuments` baseline vs. with-few-shot and diffs the results |
+| `batchDocuments.mjs` | Seeded generator for the 100-document batch (normal/oversized/unfixable/expired/canceled/flaky mix) |
+| `fakeExtract.mjs` | Lightweight regex-based stand-in extractor used only by the mock batch client |
+| `mockBatchClient.mjs` | Scripted, interface-compatible stand-in for `client.messages.batches` (+ sync `client.messages.create`) |
+| `simulatedClock.mjs` | Fake clock so SLA timing can be tested without real waiting |
+| `chunking.mjs` | Paragraph/sentence-aware document chunker + chunk `custom_id` helpers |
+| `batchErrorClassifier.mjs` | Classifies a batch error into transient / oversized / unfixable |
+| `slaTracker.mjs` | SLA constant + elapsed-time/margin calculation from batch timestamps |
+| `batchPipeline.mjs` | Orchestrates round 1 → classify → SLA-aware round 2 (batch or sync) → merge → report |
+| `batchRunner.mjs` | Entry point: runs the pipeline against the mock client and prints the report |
 
-## Next: Step 4
+## Exercise complete
 
-Not yet started.
+All four steps done: schema design with required/nullable/enum-detail
+patterns, a validation-retry loop with empirical resolvable-vs-unresolved
+classification, few-shot examples for structural variety (with an honest
+null-result finding), and a batch processing strategy with custom_id-based
+failure handling, chunk-and-resubmit, and SLA-aware fallback routing.
