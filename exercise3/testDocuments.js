@@ -34,5 +34,12 @@ export const testDocuments = [
             "1 star. The Aurora Blender Pro made a burning plastic smell after " +
             "10 minutes of light use and the app pairing (yes, this blender has " +
             "an app) never worked. Very disappointed, would not recommend."
+    },
+    {
+        id: "doc_adversarial_no_rating",
+        label: "ADVERSARIAL — no numeric/star rating anywhere, tests a REQUIRED field with no source data",
+        text:
+            "Got the Aurora Blender Pro last week. It's a blender. It blends things. " +
+            "I have used it twice."
     }
 ];

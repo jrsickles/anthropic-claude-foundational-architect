@@ -1,9 +1,10 @@
 /**
- * Exercise 3, Step 1 — Standalone verification runner.
+ * Exercise 3, Step 1 + Step 2 — Verification runner.
  *
- * Run this locally (Node.js) to sanity-check the tool schema against
- * real API responses before wiring it into the Vue app. Needs:
- *   npm install @anthropic-ai/sdk dotenv
+ * Run this locally (Node.js) to sanity-check the tool schema and the
+ * validation-retry loop against real API responses before wiring either
+ * into the Vue app. Needs:
+ *   npm install @anthropic-ai/sdk dotenv ajv
  * and a .env file with ANTHROPIC_API_KEY=sk-ant-...
  *
  * Usage: node testRunner.mjs
@@ -13,42 +14,35 @@ import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import { extractionTool } from "./extractionTool.js";
 import { testDocuments } from "./testDocuments.js";
+import { extractWithValidation } from "./validationLoop.mjs";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-async function extract(reviewText) {
-    const response = await client.messages.create({
-        model: "claude-sonnet-4-5",
-        max_tokens: 1024,
-        tools: [extractionTool],
-        tool_choice: { type: "tool", name: "extract_review_data" },
-        messages: [
-            {
-                role: "user",
-                content: `Extract structured data from this product review:\n\n${reviewText}`
-            }
-        ]
-    });
-
-    const toolUse = response.content.find((block) => block.type === "tool_use");
-    return toolUse ? toolUse.input : null;
-}
 
 function report(doc, result) {
     console.log(`\n=== ${doc.id} — ${doc.label} ===`);
     console.log(doc.text);
-    console.log("--- extracted ---");
-    console.log(JSON.stringify(result, null, 2));
+    console.log("--- final extraction ---");
+    console.log(JSON.stringify(result.data, null, 2));
+    console.log(
+        `success: ${result.success} | attempts: ${result.attempts} | ` +
+        `resolved-by-retry: ${result.resolvedErrors.length} | unresolved: ${result.unresolvedErrors.length}`
+    );
 
-    const nullFields = Object.entries(result)
-        .filter(([, v]) => v === null)
-        .map(([k]) => k);
-    console.log(`null fields returned: ${nullFields.length ? nullFields.join(", ") : "(none)"}`);
+    if (result.resolvedErrors.length) {
+        console.log("  resolved (format mismatch, retry fixed it):");
+        result.resolvedErrors.forEach((e) =>
+            console.log(`    - ${e.path}: ${e.message} (fixed on attempt ${e.resolvedOnAttempt})`)
+        );
+    }
+    if (result.unresolvedErrors.length) {
+        console.log("  unresolved (information likely absent from source):");
+        result.unresolvedErrors.forEach((e) => console.log(`    - ${e.path}: ${e.message}`));
+    }
 }
 
 async function main() {
     for (const doc of testDocuments) {
-        const result = await extract(doc.text);
+        const result = await extractWithValidation(client, extractionTool, doc.text);
         report(doc, result);
     }
 }
