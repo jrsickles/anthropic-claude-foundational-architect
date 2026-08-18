@@ -43,3 +43,51 @@ export const testDocuments = [
             "I have used it twice."
     }
 ];
+
+/**
+ * Step 3 — structurally varied documents, distinct products/wording from the
+ * few-shot examples in fewShotExamples.mjs, used to test whether few-shot
+ * generalizes to new instances of the same shapes rather than just being
+ * memorized verbatim.
+ */
+export const structuralVarietyDocuments = [
+    {
+        id: "doc_labeled_table",
+        label: "Labeled/bulleted review (table-like, not prose)",
+        text:
+            "Product: TrailBrew Camp Kettle\n" +
+            "Rating: 5/5\n" +
+            "Pros: Boils fast, packs flat, lid seals tight\n" +
+            "Cons: Handle gets warm without the sleeve\n" +
+            "Verified Purchase: Yes"
+    },
+    {
+        id: "doc_buried_facts",
+        label: "Buried facts in a casual forum-style post (rating/verdict not labeled up front)",
+        text:
+            "picked up the TrailBrew Camp Kettle for a trip last month, been " +
+            "meaning to write this up forever lol. anyway it's whatever, does " +
+            "what it says. the little rubber foot on the bottom fell off after " +
+            "the second trip which was annoying since it's supposed to protect " +
+            "the table. my buddy has the bigger one and likes his more. " +
+            "3/5 honestly, probably wouldn't grab it again. -- sent from my phone"
+    },
+    {
+        id: "doc_adversarial_html_sarcasm_decoy",
+        label:
+            "ADVERSARIAL — scraped HTML noise + a stated rating that contradicts sarcastic prose " +
+            "+ a decoy second product with its own rating that must not leak into the extraction",
+        text:
+            '<div class="review-block">\n' +
+            "  <table>\n" +
+            "    <tr><td>Item</td><td>TrailBrew Camp Kettle</td></tr>\n" +
+            "    <tr><td>Stars</td><td>5</td></tr>\n" +
+            "  </table>\n" +
+            "  <p>Oh sure, FIVE STARS, because nothing says \"quality camping gear\" like a kettle " +
+            "that whistles so loud it woke up the entire campsite AND melted a little on one side " +
+            'after the second use. Genuinely can\'t recommend this enough if your goal is a group ' +
+            "chat full of angry friends.</p>\n" +
+            "  <p>Customers who bought this also liked the TrailBrew Mug (4.8 stars, 200 reviews).</p>\n" +
+            "</div>"
+    }
+];

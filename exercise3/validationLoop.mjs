@@ -33,6 +33,9 @@ function formatErrorsForPrompt(errors) {
  * @param {object} tool - the tool definition (name + input_schema)
  * @param {string} documentText - the source document being extracted from
  * @param {object} opts
+ * @param {Array} [opts.fewShotMessages] - prior user/assistant/user turns
+ *   (see fewShotExamples.mjs's buildFewShotMessages()) prepended before the
+ *   real query, to demonstrate handling of structurally varied documents.
  * @returns {{
  *   success: boolean,
  *   data: object|null,
@@ -47,6 +50,7 @@ export async function extractWithValidation(client, tool, documentText, opts = {
     const model = opts.model ?? "claude-sonnet-4-5";
 
     const messages = [
+        ...(opts.fewShotMessages ?? []),
         {
             role: "user",
             content: `Extract structured data from this product review:\n\n${documentText}`

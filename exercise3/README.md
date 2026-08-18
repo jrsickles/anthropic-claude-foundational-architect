@@ -127,17 +127,85 @@ was never needed for that case. The loop earns its place for the failures a
 schema *can't* prevent by construction (e.g. the model forgetting
 `defect_detail` when it picks `"other"`).
 
+## Step 3 — Few-shot examples for structural variety
+
+`fewShotExamples.mjs` injects real prior conversation turns before the
+actual query — user doc → assistant `tool_use` call → user `tool_result`
+turn — rather than describing examples in prose inside the tool's
+`description`. Demonstrating by example, in the same tool_use modality the
+model has to reproduce, is the standard approach and generally more
+reliable than asking the model to translate a written description into
+action. `validationLoop.mjs` accepts an `opts.fewShotMessages` array,
+prepended before the real query.
+
+Two example shapes were taught, distinct from anything in the step 1/2 test
+set (all narrative prose so far):
+
+1. **Labeled/bulleted review** (`Product:` / `Rating:` / `Pros:` / `Cons:` —
+   closer to a table than prose, fields explicitly labeled).
+2. **Buried-facts forum post** — rating and verdict are terse and appear
+   mid-post (TL;DR-style) surrounded by narrative tangents and signature
+   text unrelated to the review, mirroring "inline citation scattered in
+   text vs. collected in a bibliography."
+
+One bug caught before delivery: the first draft of example 2 set
+`product_name: null` to demonstrate an unstated product name, but the
+schema's `product_name` field is `{ type: "string" }` (not nullable) — that
+example would have taught an invalid pattern and failed its own
+validation. Fixed by rewriting the example text so the product name is
+naturally stated instead.
+
+### Verification: does few-shot measurably improve structural handling?
+
+`comparisonRunner.mjs` runs each document in `structuralVarietyDocuments`
+twice — once with zero few-shot examples (baseline), once with the
+few-shot turns injected — and diffs the two extractions field by field, so
+a real difference (or lack of one) is visible rather than assumed. Three
+documents were tested, using different products/wording than the few-shot
+examples themselves (testing generalization, not memorization):
+
+- **`doc_labeled_table`** (labeled/bulleted format): baseline and few-shot
+  extractions were identical. Baseline already parsed the labeled format
+  correctly on its own.
+- **`doc_buried_facts`** (casual forum post, rating/verdict unlabeled):
+  baseline and few-shot extractions were identical.
+- **`doc_adversarial_html_sarcasm_decoy`** (constructed to be genuinely
+  hard: scraped HTML/table noise, a stated 5-star rating directly
+  contradicted by sarcastic prose, and a decoy second product with its own
+  4.8 rating mentioned in a "customers also liked" sidebar): baseline and
+  few-shot extractions were identical. Baseline correctly kept
+  `product_name` on the real product (didn't leak the decoy Mug's rating),
+  kept `rating: 5` literal per the schema's "don't infer rating from tone"
+  instruction, and correctly resolved the sarcasm into `sentiment:
+  "negative"` and `would_recommend: false`.
+
+**Finding: few-shot examples produced no measurable improvement across all
+three structural variants tested, including the deliberately adversarial
+one.** This is a legitimate, useful result rather than a failed exercise:
+it shows few-shot only earns its keep when a model is actually struggling
+with a format or convention it hasn't internalized, and Sonnet's baseline
+instruction-following — combined with a well-specified schema whose tool
+description already says "don't infer a rating from sentiment" — was
+already strong enough that none of these structural challenges exposed a
+gap for examples to close. A weaker/cheaper model (e.g. Haiku) would be a
+more promising place to look for a case where few-shot visibly changes the
+outcome, since baseline instruction-following is weaker there and leaves
+more room for examples to move the needle. Not tested here — noted as a
+possible follow-up rather than assumed.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `extractionTool.js` | Tool definition: name, description, `input_schema` |
-| `testDocuments.js` | Sample reviews of varying completeness, plus one adversarial case |
+| `testDocuments.js` | Sample reviews of varying completeness/structure, plus adversarial cases |
 | `testRunner.mjs` | Runs all `testDocuments` through the real API + validation loop |
 | `validator.mjs` | `ajv`-based JSON Schema validator for tool output |
-| `validationLoop.mjs` | Validation-retry loop with resolved/unresolved classification |
+| `validationLoop.mjs` | Validation-retry loop with resolved/unresolved classification; accepts optional few-shot turns |
 | `validationLoop.test.mjs` | Deterministic mock-client test of the retry loop's classification logic |
+| `fewShotExamples.mjs` | Few-shot example turns (labeled/bulleted + buried-facts formats) |
+| `comparisonRunner.mjs` | Runs `structuralVarietyDocuments` baseline vs. with-few-shot and diffs the results |
 
-## Next: Step 3
+## Next: Step 4
 
 Not yet started.
