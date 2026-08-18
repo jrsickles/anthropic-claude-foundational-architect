@@ -1,6 +1,6 @@
 #directories
-/vendor/
-/.idea/
+/vendor/*
+/.idea/*
 
 #files
 .env
