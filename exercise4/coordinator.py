@@ -64,12 +64,35 @@ Step 4 adds:
     synthesis with a `coverage_gaps` array documenting which subagent
     failed, what it was trying to do, and why. To keep this parseable, the
     final synthesis's JSON block changed shape from Step 3: it's now a
-    single JSON OBJECT with two keys, "findings" (same array as before) and
-    "coverage_gaps" (array of gap objects), rather than a bare array.
+    JSON OBJECT with keys "findings" and "coverage_gaps", rather than a
+    bare array.
   - Automated verification extends to check: when --simulate-timeout was
     used, does the synthesis's coverage_gaps array actually contain an
     entry for that subagent, and did its partial_results (if any) make it
     into the merged findings.
+
+Step 5 adds:
+  - Conflicting source data. Same problem as Step 4's timeout: waiting for
+    real web search to coincidentally surface two credible sources that
+    disagree on a statistic isn't a reliable, repeatable test. Simulated
+    instead: --simulate-conflict forces BOTH web-researcher and
+    recency-checker to skip real research and each report one fixed,
+    fabricated finding on the same underlying claim, but with different
+    numeric values and different (also fabricated, clearly-marked-as-test)
+    sources - CONFLICT_SOURCE_A / CONFLICT_SOURCE_B below.
+  - The coordinator's system prompt now covers this case too: if two or
+    more findings address the same underlying question but disagree, do
+    NOT arbitrarily keep only one - keep both in the merged findings array
+    (each still tagged with its own source_agent, per Step 3), AND add an
+    entry to a new "contested_claims" array in the synthesis JSON
+    describing the conflict and listing every conflicting value with its
+    source. The synthesis JSON is now a JSON OBJECT with three keys:
+    "findings", "coverage_gaps", "contested_claims".
+  - Automated verification checks that both CONFLICT_SOURCE_A's and
+    CONFLICT_SOURCE_B's findings survive into the synthesis's findings
+    array (neither arbitrarily dropped) AND that contested_claims contains
+    an entry referencing both sources (the conflict was actually flagged,
+    not just silently listed twice).
 
 Requirements:
   pip install claude-agent-sdk python-dotenv
@@ -90,6 +113,12 @@ Usage:
       # forces the named subagent (web-researcher | recency-checker |
       # document-analyzer) to fail with a simulated timeout, to test error
       # propagation and coverage-gap annotation
+  python coordinator.py "..." --simulate-conflict
+      # forces web-researcher and recency-checker to each report a fixed,
+      # deliberately conflicting finding (different stated values, from
+      # different fabricated sources), to test that synthesis preserves
+      # both values with attribution and flags the conflict rather than
+      # silently picking one. Not combinable with --simulate-timeout.
 """
 
 from __future__ import annotations
@@ -178,6 +207,56 @@ def simulated_timeout_instructions(subagent_name: str) -> str:
     )
 
 
+# --- Step 5: simulated-conflict schema ----------------------------------
+#
+# Fixed, fabricated conflicting finding pair. Both sources are clearly
+# marked as test fixtures (TESTCONFLICT in the URL) so they can never be
+# confused with a real citation, and so verify_contested_claims() below can
+# match on them exactly rather than guessing which findings conflict.
+
+CONFLICT_SOURCE_A = "https://extension.example.edu/pasture-guidelines-TESTCONFLICT"
+CONFLICT_SOURCE_B = "https://livestockresearch.example.org/grazing-intervals-TESTCONFLICT"
+
+
+def simulated_conflict_instructions_a() -> str:
+    return (
+        "\n\nSIMULATED CONFLICT MODE (for testing this pipeline's handling "
+        "of contradictory sources only - not real research): Skip your "
+        "normal research task entirely. Instead, return ONLY this exact "
+        "fenced ```json array (do not alter the values):\n"
+        "```json\n"
+        "[{\n"
+        '  "claim": "The recommended pasture rest period between grazing '
+        'rotations is 14 days.",\n'
+        '  "evidence_excerpt": "Extension guidance recommends a minimum '
+        '14-day rest period to allow adequate forage regrowth.",\n'
+        f'  "source": "{CONFLICT_SOURCE_A}",\n'
+        '  "publication_date": "2024-06-01"\n'
+        "}]\n"
+        "```"
+    )
+
+
+def simulated_conflict_instructions_b() -> str:
+    return (
+        "\n\nSIMULATED CONFLICT MODE (for testing this pipeline's handling "
+        "of contradictory sources only - not real research): Skip your "
+        "normal research task entirely. Instead, return ONLY this exact "
+        "fenced ```json array (do not alter the values):\n"
+        "```json\n"
+        "[{\n"
+        '  "claim": "The recommended pasture rest period between grazing '
+        'rotations is 21 days.",\n'
+        '  "evidence_excerpt": "Recent grazing-interval research found '
+        '21-day rest periods produced measurably better forage recovery '
+        'than shorter cycles.",\n'
+        f'  "source": "{CONFLICT_SOURCE_B}",\n'
+        '  "publication_date": "2025-01-15"\n'
+        "}]\n"
+        "```"
+    )
+
+
 PARALLEL_INSTRUCTIONS = (
     "1. In a SINGLE response, emit two Task tool calls at once: one to "
     "web-researcher (general/background research on the user's topic) and "
@@ -209,12 +288,10 @@ ERROR_PROPAGATION_INSTRUCTIONS = (
     "treat those as real findings and include them in your final merged "
     "findings (tagged with the correct source_agent) - a partial timeout "
     "still produced some real evidence, and it should not be discarded.\n"
-    "  c. In your final synthesis, instead of a bare JSON array, return a "
-    "single JSON OBJECT with two keys: \"findings\" (the same merged-"
-    "findings array as before, each with source_agent) and "
-    '"coverage_gaps" (an array of objects - one per failed subagent - '
+    "  c. In your final synthesis JSON object (shape given below), set "
+    '"coverage_gaps" to an array of objects - one per failed subagent - '
     'each with keys "subagent", "failure_type", "attempted_query", and '
-    '"error_message", copied from that subagent\'s error object). If '
+    '"error_message", copied from that subagent\'s error object. If '
     "nothing failed, coverage_gaps should be an empty array [].\n"
     "  d. Also say so in your prose summary - explicitly tell the user "
     "which subagent failed, what it was trying to do, and what that means "
@@ -222,15 +299,62 @@ ERROR_PROPAGATION_INSTRUCTIONS = (
 )
 
 
+CONTESTED_CLAIMS_INSTRUCTIONS = (
+    "\n\nCONFLICTING SOURCES: two or more subagents may report findings "
+    "that address the same underlying question but disagree - e.g. "
+    "different subagents citing different numbers for the same statistic. "
+    "When this happens, you must NOT arbitrarily keep only one value and "
+    "discard the other, and you must NOT silently present both as if they "
+    "were consistent. Instead:\n"
+    "  a. Keep BOTH (or all) conflicting findings in your merged findings "
+    "array, each still tagged with its own correct source_agent and "
+    "source, exactly as Step 3's provenance rules require.\n"
+    "  b. In your final synthesis JSON object, set \"contested_claims\" to "
+    "an array of objects, one per conflict, each with keys \"topic\" (a "
+    "short description of what's being disputed), and \"conflicting_values"
+    "\" (an array of objects, one per disagreeing source, each with keys "
+    "\"value\", \"source\", \"source_agent\", \"publication_date\" - "
+    "pulled directly from the corresponding findings, not reworded). If "
+    "there are no conflicts, contested_claims should be an empty array [].\n"
+    "  c. In your prose summary, explicitly distinguish well-established "
+    "findings (reported consistently, or by only one source with no "
+    "contradiction) from contested ones - do not present a contested claim "
+    "as settled fact."
+)
+
+
+SYNTHESIS_JSON_SHAPE_INSTRUCTIONS = (
+    "\n\nFINAL SYNTHESIS JSON SHAPE: your final synthesis must include a "
+    "fenced ```json code block containing a single JSON OBJECT with "
+    'exactly three keys: "findings" (array - every finding from every '
+    "subagent, merged, each keeping its original claim/evidence_excerpt/"
+    "source/publication_date EXACTLY as reported plus a source_agent key "
+    'naming which subagent produced it), "coverage_gaps" (array - see '
+    'ERROR HANDLING), and "contested_claims" (array - see CONFLICTING '
+    "SOURCES). Do not paraphrase, shorten, or drop a finding's source or "
+    "publication_date when merging - that is how provenance survives the "
+    "merge. You may also write prose, but the JSON block must be present "
+    "and complete."
+)
+
+
 def build_options(
-    sequential: bool, model: str, simulate_timeout: str | None
+    sequential: bool,
+    model: str,
+    simulate_timeout: str | None,
+    simulate_conflict: bool,
 ) -> ClaudeAgentOptions:
     call_pattern = SEQUENTIAL_INSTRUCTIONS if sequential else PARALLEL_INSTRUCTIONS
 
-    def maybe_simulate(name: str, base_prompt: str) -> str:
+    def apply_simulations(name: str, base_prompt: str) -> str:
+        prompt = base_prompt
         if simulate_timeout == name:
-            return base_prompt + simulated_timeout_instructions(name)
-        return base_prompt
+            prompt += simulated_timeout_instructions(name)
+        if simulate_conflict and name == "web-researcher":
+            prompt += simulated_conflict_instructions_a()
+        if simulate_conflict and name == "recency-checker":
+            prompt += simulated_conflict_instructions_b()
+        return prompt
 
     return ClaudeAgentOptions(
         # allowed_tools is the auto-approve list for the (session-wide)
@@ -249,7 +373,7 @@ def build_options(
                     "Searches the web for general/background information on a "
                     "topic and returns structured findings with sources/URLs."
                 ),
-                prompt=maybe_simulate(
+                prompt=apply_simulations(
                     "web-researcher",
                     "You are a research assistant. Given a topic, search the web "
                     "for general/background information. "
@@ -264,7 +388,7 @@ def build_options(
                     "web-researcher - does not need its output and can run "
                     "alongside it."
                 ),
-                prompt=maybe_simulate(
+                prompt=apply_simulations(
                     "recency-checker",
                     "You are a recency-focused research assistant. Given a "
                     "topic, search the web for only the most recent "
@@ -280,7 +404,7 @@ def build_options(
                     "supplied directly in its prompt. Use this after "
                     "web-researcher and recency-checker have both returned."
                 ),
-                prompt=maybe_simulate(
+                prompt=apply_simulations(
                     "document-analyzer",
                     "You are a document analyst. You will be given prior research "
                     "findings directly in your prompt text - you have no access to "
@@ -311,20 +435,10 @@ def build_options(
             "output on its own - subagents do not share context automatically, "
             "so you must copy the relevant findings into the prompt yourself.\n"
             "4. Once all three subagents have reported back, produce a final "
-            "synthesis for the user. Your final synthesis MUST include a fenced "
-            "```json code block - see the exact shape required in ERROR HANDLING "
-            "below, which applies whether or not anything actually failed. Every "
-            'finding object must keep the same four keys (claim, '
-            "evidence_excerpt, source, publication_date) EXACTLY as the "
-            "subagent reported them - do not paraphrase away, shorten, or drop "
-            'the source or publication_date - and add a fifth key, '
-            '"source_agent", set to whichever of web-researcher, '
-            "recency-checker, or document-analyzer produced that finding. This "
-            "is how provenance is preserved through the merge - every finding in "
-            "your output must be traceable back to the subagent and source it "
-            "came from. You may also write prose summarizing the findings, but "
-            "the JSON block must be present and complete."
+            "synthesis for the user."
+            + SYNTHESIS_JSON_SHAPE_INSTRUCTIONS
             + ERROR_PROPAGATION_INSTRUCTIONS
+            + CONTESTED_CLAIMS_INSTRUCTIONS
         ),
         model=model,
     )
@@ -389,29 +503,34 @@ def extract_errors(text: str) -> list:
     return errors
 
 
-def extract_synthesis(text: str) -> tuple[list, list]:
-    """Pull the coordinator's final synthesis out of `text`. Step 4 shape is
-    a JSON OBJECT: {"findings": [...], "coverage_gaps": [...]}. Falls back
-    to treating a bare array as findings-only with no gaps, for tolerance
-    if the model reverts to the Step 3 shape."""
-    findings, gaps = [], []
+def extract_synthesis(text: str) -> tuple[list, list, list]:
+    """Pull the coordinator's final synthesis out of `text`. Step 5 shape is
+    a JSON OBJECT: {"findings": [...], "coverage_gaps": [...],
+    "contested_claims": [...]}. Falls back to treating a bare array as
+    findings-only, for tolerance if the model reverts to an older shape."""
+    findings, gaps, contested = [], [], []
     for raw in _JSON_BLOCK_RE.findall(text):
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict) and (
-            "findings" in parsed or "coverage_gaps" in parsed
+            "findings" in parsed
+            or "coverage_gaps" in parsed
+            or "contested_claims" in parsed
         ):
             f = parsed.get("findings", [])
             g = parsed.get("coverage_gaps", [])
+            c = parsed.get("contested_claims", [])
             if isinstance(f, list):
                 findings.extend(x for x in f if isinstance(x, dict))
             if isinstance(g, list):
                 gaps.extend(x for x in g if isinstance(x, dict))
+            if isinstance(c, list):
+                contested.extend(x for x in c if isinstance(x, dict))
         elif isinstance(parsed, list):
             findings.extend(x for x in parsed if isinstance(x, dict))
-    return findings, gaps
+    return findings, gaps, contested
 
 
 def verify_attribution(subagent_findings: list, synthesis_findings: list) -> str:
@@ -539,9 +658,71 @@ def verify_error_propagation(
     return "\n".join(lines)
 
 
+def verify_contested_claims(
+    simulate_conflict: bool, synthesis_findings: list, contested_claims: list
+) -> str:
+    """Check that a simulated conflict (a) had both conflicting values
+    survive into the merged findings, unarbitrarily reduced to one, and
+    (b) got flagged in contested_claims rather than silently listed as if
+    the two findings simply agreed."""
+    lines = []
+
+    if not simulate_conflict:
+        lines.append("No conflict was simulated for this run "
+                      "(--simulate-conflict not set).")
+        if contested_claims:
+            lines.append(
+                f"NOTE: {len(contested_claims)} contested_claims entr(y/ies) "
+                "were reported anyway (a real conflict was found in genuine "
+                "research, or the model over-reported):"
+            )
+            for c in contested_claims:
+                lines.append(f"  - {c}")
+        return "\n".join(lines)
+
+    synthesis_sources = {f.get("source") for f in synthesis_findings}
+    a_present = CONFLICT_SOURCE_A in synthesis_sources
+    b_present = CONFLICT_SOURCE_B in synthesis_sources
+
+    lines.append(f"Conflicting finding from web-researcher (source A) preserved "
+                 f"in synthesis findings: {'YES' if a_present else 'NO'}")
+    lines.append(f"Conflicting finding from recency-checker (source B) preserved "
+                 f"in synthesis findings: {'YES' if b_present else 'NO'}")
+
+    if a_present and b_present:
+        lines.append("Neither value was arbitrarily dropped - both conflicting "
+                     "statistics survived into the merged findings.")
+    else:
+        lines.append("At least one conflicting value did NOT survive into the "
+                     "merged findings - the coordinator may have arbitrarily "
+                     "picked one source over the other.")
+
+    def references_both(claim: dict) -> bool:
+        sources = {
+            v.get("source")
+            for v in (claim.get("conflicting_values") or [])
+            if isinstance(v, dict)
+        }
+        return CONFLICT_SOURCE_A in sources and CONFLICT_SOURCE_B in sources
+
+    flagged = next((c for c in contested_claims if references_both(c)), None)
+    if flagged:
+        lines.append(f"Conflict explicitly flagged in contested_claims: YES -> {flagged}")
+    else:
+        lines.append(
+            "Conflict explicitly flagged in contested_claims: NO - the "
+            "coordinator did not annotate this as a contested claim, even "
+            "if both values happen to be present in findings. This is a "
+            "pipeline defect if both values were genuinely reported."
+        )
+
+    return "\n".join(lines)
+
+
 async def main() -> None:
     raw_args = sys.argv[1:]
     sequential = "--sequential" in raw_args
+    simulate_conflict = "--simulate-conflict" in raw_args
 
     model = DEFAULT_MODEL
     if "--model" in raw_args:
@@ -566,6 +747,15 @@ async def main() -> None:
             )
             raise SystemExit(1)
 
+    if simulate_timeout and simulate_conflict:
+        print(
+            "--simulate-timeout and --simulate-conflict cannot be combined "
+            "in one run - each replaces a subagent's real task with a fixed "
+            "scripted response, and running both at once would make it "
+            "unclear which effect any given result is testing."
+        )
+        raise SystemExit(1)
+
     # Positional args = anything left over that isn't a flag or a flag's value.
     flags_with_values = {"--model", "--simulate-timeout"}
     skip_next = False
@@ -585,13 +775,17 @@ async def main() -> None:
         print(
             'Usage: python coordinator.py "<research task for the coordinator>" '
             "[--sequential] [--model <model-name>] "
-            "[--simulate-timeout <web-researcher|recency-checker|document-analyzer>]"
+            "[--simulate-timeout <web-researcher|recency-checker|document-analyzer>] "
+            "[--simulate-conflict]"
         )
         raise SystemExit(1)
 
     task_prompt = args[0]
     options = build_options(
-        sequential=sequential, model=model, simulate_timeout=simulate_timeout
+        sequential=sequential,
+        model=model,
+        simulate_timeout=simulate_timeout,
+        simulate_conflict=simulate_conflict,
     )
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -600,11 +794,17 @@ async def main() -> None:
     # parallel vs. sequential, or Opus vs. Sonnet) side by side later.
     mode_tag = "sequential" if sequential else "parallel"
     fail_tag = f"-fail_{simulate_timeout}" if simulate_timeout else ""
-    run_file = OUTPUT_DIR / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{mode_tag}{fail_tag}.txt"
+    conflict_tag = "-conflict" if simulate_conflict else ""
+    run_file = (
+        OUTPUT_DIR
+        / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{mode_tag}{fail_tag}{conflict_tag}.txt"
+    )
 
     print(f"Running ({mode_tag})... output is being written to {run_file}")
     if simulate_timeout:
         print(f"Simulating a timeout in subagent: {simulate_timeout}")
+    if simulate_conflict:
+        print("Simulating a source conflict between web-researcher and recency-checker")
 
     # Text collected per role, with real newlines (not the escaped \n you'd
     # get from repr()), so the JSON-block regex above can actually match
@@ -617,6 +817,7 @@ async def main() -> None:
         f.write(f"MODE: {mode_tag}\n")
         f.write(f"MODEL: {model}\n")
         f.write(f"SIMULATE_TIMEOUT: {simulate_timeout}\n")
+        f.write(f"SIMULATE_CONFLICT: {simulate_conflict}\n")
         f.write(f"PROMPT: {task_prompt}\n")
         f.write("=" * 80 + "\n\n")
 
@@ -650,11 +851,12 @@ async def main() -> None:
             subagent_findings.extend(extract_findings(t))
             subagent_errors.extend(extract_errors(t))
 
-        synthesis_findings, coverage_gaps = [], []
+        synthesis_findings, coverage_gaps, contested_claims = [], [], []
         for t in coordinator_texts:
-            sf, sg = extract_synthesis(t)
+            sf, sg, sc = extract_synthesis(t)
             synthesis_findings.extend(sf)
             coverage_gaps.extend(sg)
+            contested_claims.extend(sc)
 
         attribution_report = verify_attribution(subagent_findings, synthesis_findings)
         f.write("\n" + "=" * 80 + "\n")
@@ -671,11 +873,22 @@ async def main() -> None:
         f.write("=" * 80 + "\n")
         f.write(error_report + "\n")
 
+        # --- Step 5: automated contested-claims verification -----------
+        conflict_report = verify_contested_claims(
+            simulate_conflict, synthesis_findings, contested_claims
+        )
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("VERIFICATION: conflicting sources preserved and flagged\n")
+        f.write("=" * 80 + "\n")
+        f.write(conflict_report + "\n")
+
     print(f"Done in {elapsed:.2f}s ({mode_tag}). Output written to {run_file}")
     print("\n--- Attribution verification ---")
     print(attribution_report)
     print("\n--- Error propagation verification ---")
     print(error_report)
+    print("\n--- Contested claims verification ---")
+    print(conflict_report)
 
 
 if __name__ == "__main__":
