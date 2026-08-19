@@ -100,4 +100,37 @@ A clean 33/33 pass - every finding's source and publication date survived the co
 
 ---
 
+### 4. Error propagation: simulated subagent timeout, partial results, coverage-gap annotation
+
+**Goal:** Simulate a subagent timeout and verify the coordinator receives structured error context (failure type, attempted query, partial results). Test that the coordinator can proceed with partial results and annotate the final output with coverage gaps.
+
+**Design problem worked through before writing code:** a *real* timeout can't be injected from outside the SDK - the coordinator decides when to call a subagent, and the SDK runs each `Task` call as an opaque unit with no exposed per-call timeout hook. So this simulates the failure instead of trying to force a genuine one: `--simulate-timeout <subagent-name>` rewrites that subagent's prompt to deliberately make exactly one tool call, then stop and return a structured error object instead of its normal findings - shaped like a real partial-completion timeout (some evidence gathered, then cut off) rather than either a full success or a silent blank failure.
+
+**Decisions:**
+
+- **Error schema:** `{failure_type, attempted_query, partial_results, error_message}` - `partial_results` uses the same claim/evidence_excerpt/source/publication_date shape as Step 3's findings, so anything gathered before the simulated cutoff is still a real, checkable finding, not just a string saying "it failed."
+- **Coordinator instructions extended, not replaced:** the system prompt now tells the coordinator that a subagent returning a `failure_type` object is not fatal - continue with whichever subagents succeeded, fold any `partial_results` into the merged findings (still tagged with the correct `source_agent`), and say so explicitly in prose.
+- **Synthesis JSON shape changed from Step 3:** instead of a bare findings array, the final synthesis is now a JSON *object* with two keys - `findings` (same as before) and `coverage_gaps` (an array of `{subagent, failure_type, attempted_query, error_message}` objects, one per failure). This is what makes the gap machine-checkable rather than just "mentioned somewhere in the prose."
+- **Flag chosen to target any subagent** (`web-researcher`, `recency-checker`, or `document-analyzer`), not hardcoded to one - specifically so `web-researcher` could be tested, since it's the one whose failure cascades (`document-analyzer` depends on its output), unlike `recency-checker`'s failure which is fully independent.
+- **Verification extended again, same automated approach as Step 3:** `verify_error_propagation()` checks whether the targeted subagent actually returned a structured error object, whether the coordinator's `coverage_gaps` array contains a matching entry, and whether the failed subagent's `partial_results` sources made it into the final findings.
+
+**Debugging along the way - the simulation itself didn't fire on the first attempt:** the first test run (`--simulate-timeout web-researcher`, default `claude-haiku-4-5`) came back with the verification report showing "Structured error object received from the subagent: NO." Checking the transcript confirmed why: `web-researcher` made 8 full turns and returned 41 real findings - it simply ignored the simulated-failure instructions appended to its prompt and did the actual task instead. This is the same instruction-following gap flagged in Step 2/3: Haiku deprioritized a meta-instruction ("pretend to fail") in favor of the object-level task ("research this topic"), where a stronger model held to it. Re-running the identical command with `--model claude-sonnet-5` fixed it cleanly.
+
+**Result - verified run (topic: pasture maintenance, parallel mode, `claude-sonnet-5`, `--simulate-timeout web-researcher`):**
+
+```
+Simulated failure target: web-researcher
+Structured error object received from the subagent: YES (1 error object(s) found in subagent output)
+  failure_type='timeout' attempted_query='pasture maintenance rotational grazing soil health best practices'
+  partial_results=3 item(s) error_message='Simulated timeout in web-researcher after 1 tool call.'
+Coordinator's synthesis annotated this as a coverage gap: YES -> {'subagent': 'web-researcher', 'failure_type': 'timeout', ...}
+Partial results from the failed subagent: 2 source(s); carried into final findings: 2/2
+```
+
+`web-researcher` made only 3 turns (vs. 10 each for the other two subagents) - consistent with "one tool call, then stop." All four requirements from the step were confirmed in one run: the coordinator received structured error context (failure type, attempted query, partial results all present), it proceeded rather than halting - `document-analyzer` still completed 10 turns of real cross-check work against a partially-failed upstream input, which was the more interesting case precisely because of the dependency - partial results were preserved rather than discarded, and the coverage gap was annotated in a form that matched the original error object field-for-field. Step 3's attribution check also held up under failure conditions: 26/26 subagent findings preserved into synthesis.
+
+**Result:** `coordinator.py` supports `--simulate-timeout <subagent-name>` for any of the three subagents, degrades gracefully on a simulated failure (including the cascading case where the failed subagent is a real dependency of another), and automatically verifies structured error propagation and coverage-gap annotation on every run via `verify_error_propagation()`.
+
+---
+
 *(Step log continues below as further steps are completed)*
