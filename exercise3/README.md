@@ -304,6 +304,97 @@ Two bugs caught and fixed before/during delivery:
    for extraction test data throughout this exercise applies just as much
    to how the exercise's own tooling is built.
 
+## Step 5 — Human review routing via field-level confidence
+
+Extends the exercise beyond its original 4 steps. Two confidence signals
+were built and compared head-to-head against real ground truth, rather than
+picking one on theory alone — an earlier framing in this conversation
+argued self-consistency was the more "principled" choice (it measures real
+sampling behavior rather than the model's opinion of itself), but that
+theoretical argument turned out to be incomplete once tested.
+
+**Two independent signals, both implemented (`selfConsistency.mjs`,
+`selfReportedConfidence.mjs`):**
+
+- **Self-consistency** — 3 independent extraction calls per document;
+  a field is flagged low-confidence if the 3 samples disagree; the final
+  value is the majority vote. Cost: 3x API calls.
+- **Self-reported** — 1 call, using a companion tool schema
+  (`extractionToolWithConfidence.mjs`) where the model rates its own
+  per-field confidence (`high`/`medium`/`low`, with `medium` collapsed to
+  "flagged" — a field the model itself says it had to infer rather than
+  read directly is exactly what a reviewer should double check). Cost: 1x
+  API call, same as a normal extraction.
+
+**Ground truth** (`groundTruthDocuments.mjs`): 24 hand-authored documents,
+6 each across the four structural types from steps 1/3 (narrative,
+labeled/bulleted, buried-facts, adversarial HTML+sarcasm+decoy), each with
+an exact expected extraction — verified by hand against the text, not
+derived from the same logic that would grade it (unlike step 4's mock,
+which would have trivially "passed" against itself).
+
+**Routing policy** (`reviewRouter.mjs`): if ANY field comes back
+low-confidence, the whole document routes to human review — a reviewer
+checking one flagged field needs the document's context anyway, so
+per-field-only review isn't actually cheaper, just more fragmented. The
+specific flagged fields are still reported so the reviewer knows what to
+focus on.
+
+**Accuracy analysis** (`accuracyAnalysis.mjs`) reports three things per
+run: accuracy by field, accuracy by document type, and — the check that
+actually justifies (or doesn't) the whole routing strategy — a
+precision/recall calibration of whether "flagged low-confidence" predicts
+"actually wrong."
+
+### Findings (real API, `confidenceComparisonRunner.mjs`, 96 calls total)
+
+- **Self-reported caught more real errors than self-consistency, at the
+  cost of more false alarms.** Self-consistency: 20% recall / 66.7%
+  precision. Self-reported: 46.2% recall / 42.9% precision. Self-reported
+  more than doubled the catch rate of actual mistakes, which cuts against
+  the "self-consistency is the more principled signal" argument this step
+  started with — theory said self-consistency should win; the actual
+  ground-truth comparison said self-reported caught more.
+- **Self-consistency's flag is itself non-deterministic run to run** — the
+  most important finding of this step. Re-running the same ground truth
+  set produced different catch/miss outcomes on the same documents: e.g.
+  `gt-adversarial-01`'s disagreement was caught as a clean true positive in
+  one run (2 samples said `"quality"`, one said `"other"`), then in a later
+  run all 3 samples happened to land on the same wrong answer and it wasn't
+  flagged at all. A routing decision built on whether 3 independent samples
+  happen to agree is a coin-flip on borderline cases, not a stable signal
+  from any single run — this needs averaging over many runs to trust, not
+  one-shot evaluation.
+- **A single document can dominate a document-type's reported accuracy at
+  this sample size.** `gt-buried-02` alone accounted for 6 of self-reported
+  confidence's 13 total wrong fields in one run (self-consistency got that
+  same document almost entirely right), which is most of what dragged the
+  `buried` document type down to 85.2% for that run. With only 6 documents
+  per type, one anomalous response swings a whole category's number — the
+  per-document-type breakdown should be read as suggestive with this
+  sample size, not conclusive.
+- **The two signals catch genuinely different errors** — several fields in
+  the head-to-head comparison were caught by exactly one method and missed
+  by the other (e.g. `gt-adversarial-03`'s `defect_type` error: caught by
+  self-reported, missed by self-consistency; `gt-adversarial-05`'s
+  `defect_type` error: caught by self-consistency in one run, missed by
+  self-reported). Neither signal alone is reliable enough to fully trust,
+  and a production system would likely want both, combined (e.g. route on
+  either flagging — better recall, more reviewer load — or route only when
+  both agree — better precision, more silent misses). Not implemented here;
+  noted as the natural next step rather than built out further.
+- **Most "errors" traced back to two root causes that aren't really model
+  failures**: ground truth labels I authored for `sentiment` were sometimes
+  genuinely ambiguous between `neutral`/`mixed`/`negative` (a review with
+  both a stated pro and con is defensibly either "neutral" or "mixed" — the
+  model's answer wasn't wrong so much as my single "correct" label was too
+  rigid), and `defect_type` misclassifications repeatedly landed on the
+  fuzzy boundary between `"quality"` and `"functionality"` (a fast-draining
+  battery or a loosening handle is arguably both). This is a schema/ground-truth
+  design limitation more than an extraction reliability problem, and worth
+  fixing in the taxonomy before trusting the accuracy numbers as a verdict
+  on model quality.
+
 ## Files
 
 | File | Purpose |
@@ -325,11 +416,25 @@ Two bugs caught and fixed before/during delivery:
 | `slaTracker.mjs` | SLA constant + elapsed-time/margin calculation from batch timestamps |
 | `batchPipeline.mjs` | Orchestrates round 1 → classify → SLA-aware round 2 (batch or sync) → merge → report |
 | `batchRunner.mjs` | Entry point: runs the pipeline against the mock client and prints the report |
+| `extractionFields.mjs` | Shared list of extraction field names (used by step 5's confidence modules) |
+| `groundTruthDocuments.mjs` | 24 hand-labeled documents (6 per structural type) with exact expected extractions |
+| `selfConsistency.mjs` | 3x-sampling confidence signal: flags a field low-confidence on sample disagreement |
+| `extractionToolWithConfidence.mjs` | Tool schema variant with a self-rated `field_confidence` object |
+| `selfReportedConfidence.mjs` | 1-call confidence signal: uses the model's own per-field self-rating |
+| `reviewRouter.mjs` | Routes a whole document to human review if any field is flagged low-confidence |
+| `accuracyAnalysis.mjs` | Accuracy by field/document type + precision/recall calibration of the confidence flag |
+| `reviewRoutingRunner.mjs` | Entry point: self-consistency only, against the ground truth set |
+| `confidenceComparisonRunner.mjs` | Entry point: runs both signals side by side and prints a head-to-head table |
 
 ## Exercise complete
 
-All four steps done: schema design with required/nullable/enum-detail
+All five steps done: schema design with required/nullable/enum-detail
 patterns, a validation-retry loop with empirical resolvable-vs-unresolved
 classification, few-shot examples for structural variety (with an honest
-null-result finding), and a batch processing strategy with custom_id-based
-failure handling, chunk-and-resubmit, and SLA-aware fallback routing.
+null-result finding), a batch processing strategy with custom_id-based
+failure handling, chunk-and-resubmit, and SLA-aware fallback routing, and a
+human review routing strategy comparing two confidence signals against real
+ground truth — finding that neither is reliable alone, that self-consistency's
+own flag is non-deterministic run to run, and that most apparent "errors"
+traced back to genuine ambiguity in the schema's taxonomy and the ground
+truth labels rather than model unreliability.
