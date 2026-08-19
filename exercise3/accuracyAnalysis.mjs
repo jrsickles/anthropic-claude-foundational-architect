@@ -8,10 +8,7 @@
  * you wouldn't know without comparing flags against real correctness.
  */
 
-const FIELDS = [
-    "product_name", "rating", "sentiment", "defect_type", "defect_detail",
-    "reviewer_name", "review_date", "purchase_verified", "would_recommend"
-];
+import { EXTRACTION_FIELDS as FIELDS } from "./extractionFields.mjs";
 
 function deepEqual(a, b) {
     return JSON.stringify(a) === JSON.stringify(b);

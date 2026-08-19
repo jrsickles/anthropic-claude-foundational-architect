@@ -11,16 +11,15 @@
  * high confidence; a field where they disagree is low confidence — the
  * disagreement itself IS the evidence, not a self-report.
  *
- * Cost note: 3x the API calls of a single extraction. That's the real
- * tradeoff against a self-reported confidence field, which would cost the
- * same 1 call but produce a much less trustworthy signal (see the
- * calibration check in reviewRoutingRunner.mjs's report).
+ * Cost note: 3x the API calls of a single extraction, vs. 1 call for
+ * self-reported confidence (selfReportedConfidence.mjs). Known limitation
+ * (confirmed empirically, not just assumed — see confidenceComparisonRunner.mjs):
+ * this signal only catches genuine sampling INSTABILITY. A confident,
+ * consistent-but-wrong answer looks identical to a confident, consistent,
+ * CORRECT answer from this method's point of view — it can't be caught here.
  */
 
-const FIELDS = [
-    "product_name", "rating", "sentiment", "defect_type", "defect_detail",
-    "reviewer_name", "review_date", "purchase_verified", "would_recommend"
-];
+import { EXTRACTION_FIELDS as FIELDS } from "./extractionFields.mjs";
 
 function majorityValue(values) {
     const counts = new Map();
