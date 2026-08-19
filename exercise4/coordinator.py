@@ -28,6 +28,25 @@ Step 2 adds:
   - Wall-clock timing around the whole run, so each output file records how
     long it took.
 
+Step 3 adds:
+  - A structured finding schema that separates content from metadata: every
+    subagent must return findings as a fenced ```json array of objects with
+    exactly these keys - claim, evidence_excerpt, source, publication_date
+    (null if unknown). This applies to all three subagents, including
+    document-analyzer, whose `source` is the local file path/name it read
+    (not a URL).
+  - The coordinator's own final synthesis must ALSO be returned as a
+    ```json array in the same shape, plus a `source_agent` key identifying
+    which subagent each finding came from - so provenance survives the
+    merge, not just the raw subagent outputs.
+  - Automated verification (not just eyeballing): after the run, the script
+    extracts every JSON finding block emitted by a subagent and every JSON
+    finding block emitted by the coordinator's final synthesis, and checks
+    that each subagent finding's (source, publication_date) pair survives
+    unchanged into the synthesis. A verification report - counts, and any
+    findings whose source/date were dropped or altered - is appended to the
+    run's output file.
+
 Requirements:
   pip install claude-agent-sdk python-dotenv
   A .env file in this directory containing:
@@ -37,15 +56,19 @@ Requirements:
 Usage:
   python coordinator.py "Research <topic> and cross-check it against the local docs/ folder"
   python coordinator.py "Research <topic> and cross-check it against the local docs/ folder" --sequential
-  python coordinator.py "..." --model claude-haiku-4-5   # cheapest tier - use when
-                                                          # testing tool-call plumbing
-                                                          # (e.g. parallelism), not when
-                                                          # the research quality matters
+  python coordinator.py "..." --model claude-sonnet-5   # DEFAULT_MODEL below is currently
+                                                         # set to the cheapest tier for
+                                                         # plumbing tests - override with
+                                                         # --model when research quality
+                                                         # (and reliably-formatted JSON
+                                                         # findings) matters
 """
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 
+import json
 import os
+import re
 import sys
 import time
 import anyio
@@ -68,6 +91,31 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
         "(see .env.example) or export it in your shell."
     )
     raise SystemExit(1)
+
+
+# --- Step 3: structured finding schema ---------------------------------
+#
+# Every finding, from every subagent, must separate CONTENT (the claim and
+# the evidence backing it) from METADATA (where it came from and when it
+# was published/reviewed). This is what lets the coordinator's synthesis be
+# checked programmatically for attribution loss, instead of just trusting
+# that a paragraph "mentions its sources somewhere."
+
+FINDING_SCHEMA_INSTRUCTIONS = (
+    "Return your findings as a fenced JSON code block (```json ... ```) "
+    "containing an array of objects. Each object must have EXACTLY these "
+    "four keys:\n"
+    '  - "claim": the finding itself, one sentence.\n'
+    '  - "evidence_excerpt": a short direct quote or close paraphrase of '
+    "the specific text that supports the claim.\n"
+    '  - "source": the URL (for web findings) or local file path (for '
+    "document findings) the claim came from.\n"
+    '  - "publication_date": an ISO date (YYYY-MM-DD) if known, otherwise '
+    "the JSON value null - do not guess a date.\n"
+    "Include this JSON block even if you also write prose - the JSON block "
+    "is what gets parsed downstream. If you have no findings, return an "
+    "empty JSON array []."
+)
 
 
 PARALLEL_INSTRUCTIONS = (
@@ -106,13 +154,12 @@ def build_options(sequential: bool, model: str) -> ClaudeAgentOptions:
             "web-researcher": AgentDefinition(
                 description=(
                     "Searches the web for general/background information on a "
-                    "topic and returns findings with sources/URLs."
+                    "topic and returns structured findings with sources/URLs."
                 ),
                 prompt=(
                     "You are a research assistant. Given a topic, search the web "
-                    "and return a concise summary of findings. For every claim, "
-                    "cite the source URL it came from. If a search turns up "
-                    "nothing useful, say so explicitly rather than guessing."
+                    "for general/background information. "
+                    + FINDING_SCHEMA_INSTRUCTIONS
                 ),
                 tools=["WebSearch", "WebFetch"],
             ),
@@ -128,9 +175,7 @@ def build_options(sequential: bool, model: str) -> ClaudeAgentOptions:
                     "topic, search the web for only the most recent "
                     "developments - roughly the last 30-60 days. Ignore "
                     "older/background material; that is handled by a separate "
-                    "subagent. For every claim, cite the source URL and its "
-                    "publication date if available. If nothing recent is "
-                    "found, say so explicitly rather than guessing."
+                    "subagent. " + FINDING_SCHEMA_INSTRUCTIONS
                 ),
                 tools=["WebSearch", "WebFetch"],
             ),
@@ -146,8 +191,11 @@ def build_options(sequential: bool, model: str) -> ClaudeAgentOptions:
                     "any earlier conversation, so treat the prompt as your only "
                     "source of that context. Read the specified local files and "
                     "assess how they relate to (support, contradict, or are silent "
-                    "on) those findings. Cite the specific file and, where "
-                    "possible, the line or section you're drawing from."
+                    "on) those findings. For each relevant thing you find in the "
+                    'local files, produce a finding whose "source" is the local '
+                    'file path and whose "publication_date" is that document\'s '
+                    "own stated date if it has one (otherwise null - do not use "
+                    "today's date as a substitute). " + FINDING_SCHEMA_INSTRUCTIONS
                 ),
                 tools=["Read", "Grep", "Glob"],
             ),
@@ -157,20 +205,121 @@ def build_options(sequential: bool, model: str) -> ClaudeAgentOptions:
             "the Task tool. Follow this sequence:\n"
             + call_pattern
             + "2. Once web-researcher and recency-checker have both returned, read "
-            "both sets of findings yourself.\n"
+            "both sets of structured findings yourself.\n"
             "3. Delegate to the document-analyzer subagent. In the prompt you give "
             "it, explicitly include BOTH web-researcher's and recency-checker's "
-            "findings as plain text, plus the local path(s) to analyze. Do not "
-            "assume document-analyzer can see prior subagent output on its own - "
-            "subagents do not share context automatically, so you must copy the "
-            "relevant findings into the prompt yourself.\n"
+            "findings (their full JSON, not a paraphrase) as plain text, plus the "
+            "local path(s) to analyze. Do not assume document-analyzer can see "
+            "prior subagent output on its own - subagents do not share context "
+            "automatically, so you must copy the relevant findings into the "
+            "prompt yourself.\n"
             "4. Once all three subagents have reported back, produce a final "
-            "summary for the user that clearly attributes each piece of "
-            "information to the subagent (and, for document findings, the file) "
-            "it came from."
+            "synthesis for the user. Your final synthesis MUST include a fenced "
+            "```json code block containing an array of ALL findings from ALL "
+            "three subagents, merged. Each object must keep the same four keys "
+            "(claim, evidence_excerpt, source, publication_date) EXACTLY as the "
+            "subagent reported them - do not paraphrase away, shorten, or drop "
+            'the source or publication_date - and add a fifth key, '
+            '"source_agent", set to whichever of web-researcher, '
+            "recency-checker, or document-analyzer produced that finding. This "
+            "is how provenance is preserved through the merge - every finding in "
+            "your output must be traceable back to the subagent and source it "
+            "came from. You may also write prose summarizing the findings, but "
+            "the JSON block must be present and complete."
         ),
         model=model,
     )
+
+
+def _extract_text(content) -> str:
+    """Pull plain text out of an SDK message's `content`, which may be a
+    string, or a list of blocks/dicts (TextBlock, ToolResultBlock, etc.)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for item in content:
+        text = getattr(item, "text", None)
+        if text is None and isinstance(item, dict):
+            text = item.get("text")
+        if text is None and isinstance(item, dict):
+            # ToolResultBlock-style content can itself be a nested list of
+            # {"type": "text", "text": ...} dicts.
+            inner = item.get("content")
+            if isinstance(inner, list):
+                text = _extract_text(inner)
+            elif isinstance(inner, str):
+                text = inner
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+_JSON_BLOCK_RE = re.compile(r"```json\s*(\[.*?\])\s*```", re.DOTALL)
+
+
+def extract_findings(text: str) -> list:
+    """Pull every well-formed findings array out of one or more ```json
+    fenced blocks in `text`. Malformed blocks are skipped, not fatal -
+    a subagent producing bad JSON shouldn't crash the whole run."""
+    findings = []
+    for raw in _JSON_BLOCK_RE.findall(text):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            findings.extend(f for f in parsed if isinstance(f, dict))
+    return findings
+
+
+def verify_attribution(subagent_findings: list, synthesis_findings: list) -> str:
+    """Check that every subagent finding's (source, publication_date) pair
+    survives, unchanged, into at least one synthesis finding. Returns a
+    human-readable report; does not raise - a failed check is a finding
+    about the pipeline, not a crash."""
+    lines = []
+    lines.append(f"Subagent findings extracted: {len(subagent_findings)}")
+    lines.append(f"Synthesis findings extracted: {len(synthesis_findings)}")
+
+    synthesis_keys = {
+        (f.get("source"), f.get("publication_date")) for f in synthesis_findings
+    }
+
+    preserved = 0
+    dropped = []
+    for f in subagent_findings:
+        key = (f.get("source"), f.get("publication_date"))
+        if key in synthesis_keys:
+            preserved += 1
+        else:
+            dropped.append(f)
+
+    total = len(subagent_findings)
+    lines.append(
+        f"Findings with (source, publication_date) preserved in synthesis: "
+        f"{preserved}/{total}"
+    )
+
+    missing_source_agent = [f for f in synthesis_findings if not f.get("source_agent")]
+    if missing_source_agent:
+        lines.append(
+            f"WARNING: {len(missing_source_agent)} synthesis finding(s) are "
+            "missing a source_agent tag."
+        )
+
+    if dropped:
+        lines.append("\nDropped or altered (present in subagent output, not found "
+                      "unchanged in synthesis):")
+        for f in dropped:
+            lines.append(f"  - source={f.get('source')!r} "
+                         f"publication_date={f.get('publication_date')!r} "
+                         f"claim={f.get('claim')!r}")
+    else:
+        lines.append("\nNo findings were dropped or altered.")
+
+    return "\n".join(lines)
 
 
 async def main() -> None:
@@ -219,19 +368,60 @@ async def main() -> None:
 
     print(f"Running ({mode_tag})... output is being written to {run_file}")
 
+    # Text collected per role, with real newlines (not the escaped \n you'd
+    # get from repr()), so the JSON-block regex above can actually match
+    # multi-line findings arrays after the run completes.
+    subagent_texts = []
+    coordinator_texts = []
+
     start = time.monotonic()
     with run_file.open("w", encoding="utf-8") as f:
         f.write(f"MODE: {mode_tag}\n")
         f.write(f"MODEL: {model}\n")
         f.write(f"PROMPT: {task_prompt}\n")
         f.write("=" * 80 + "\n\n")
+
         async for message in query(prompt=task_prompt, options=options):
             f.write(repr(message) + "\n\n")
+
+            content = getattr(message, "content", None)
+            if content is None:
+                continue
+            text = _extract_text(content)
+            if not text:
+                continue
+
+            # parent_tool_use_id is None for the coordinator's own turns,
+            # and set to the Task's tool_use_id for anything originating
+            # inside a subagent (its own turns, and the UserMessage
+            # carrying its final tool result back to the coordinator).
+            if getattr(message, "parent_tool_use_id", None) is None:
+                coordinator_texts.append(text)
+            else:
+                subagent_texts.append(text)
+
         elapsed = time.monotonic() - start
         f.write("=" * 80 + "\n")
         f.write(f"WALL-CLOCK DURATION: {elapsed:.2f}s ({mode_tag})\n")
 
+        # --- Step 3: automated source-attribution verification ---------
+        subagent_findings = []
+        for t in subagent_texts:
+            subagent_findings.extend(extract_findings(t))
+
+        synthesis_findings = []
+        for t in coordinator_texts:
+            synthesis_findings.extend(extract_findings(t))
+
+        report = verify_attribution(subagent_findings, synthesis_findings)
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("VERIFICATION: source attribution preserved through synthesis\n")
+        f.write("=" * 80 + "\n")
+        f.write(report + "\n")
+
     print(f"Done in {elapsed:.2f}s ({mode_tag}). Output written to {run_file}")
+    print("\n--- Attribution verification ---")
+    print(report)
 
 
 if __name__ == "__main__":

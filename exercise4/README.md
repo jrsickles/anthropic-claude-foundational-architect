@@ -70,4 +70,34 @@ Parallel dispatch was **~39% faster** and, in this run, **~34% cheaper**. The co
 
 ---
 
+### 3. Structured findings (content vs. metadata) with verified source attribution
+
+**Goal:** Design structured output for subagents that separates content from metadata - each finding should include a claim, evidence excerpt, source URL/document name, and publication date - and verify that the synthesis subagent preserves source attribution when combining findings.
+
+**Setup problem noticed before writing code:** every run so far had `document-analyzer` returning zero real findings, because `./docs` only contained the Step 1 building-codes placeholder and every test topic since (swim training, pasture maintenance) was unrelated to it. That was fine when testing plumbing, but Step 3 needed at least one subagent to produce genuine, checkable findings - otherwise there'd be nothing to verify attribution on. Added `docs/pasture_maintenance_notes.md`, a real dated (2025-03-10) local reference doc on the same topic used in Step 2's testing, so `document-analyzer` would have actual claims to extract.
+
+**Decisions:**
+
+- **Finding schema:** every subagent (`web-researcher`, `recency-checker`, `document-analyzer`) must return a fenced ```json array of objects with exactly four keys - `claim`, `evidence_excerpt`, `source` (URL for web findings, local file path for document findings), `publication_date` (ISO date or `null` - explicitly instructed not to guess a date if unknown). This is the content/metadata separation the step asked for: `claim`/`evidence_excerpt` are the content, `source`/`publication_date` are the metadata that make the content traceable and datable.
+- **Synthesis must re-emit the same schema, not paraphrase it away:** the coordinator's system prompt requires its final synthesis to include its own ```json block - an array of every finding from all three subagents, merged, with the original four fields kept byte-for-byte and one field added, `source_agent`, naming which subagent produced it. Keeping the original fields (rather than letting the coordinator summarize them into prose) is what makes provenance survive the merge instead of dissolving into an unsourced summary.
+- **Verification is automated, not eyeballed:** added `extract_findings()` (parses every ```json block out of subagent vs. coordinator text) and `verify_attribution()` (checks that each subagent finding's `(source, publication_date)` pair appears unchanged in the synthesis output). The report - counts and any dropped/altered findings - is appended to the run file and printed to console after every run. This directly answers the step's "verify" requirement with a repeatable check instead of a one-time manual read.
+- Text extraction had to bypass the existing `repr(message)` logging: `repr()` escapes newlines as literal `\n`, which breaks multi-line JSON regex matching. Added a separate `_extract_text()` pass that pulls real text (with real newlines) out of each message's `content` during the run, split into `coordinator_texts` vs. `subagent_texts` using `parent_tool_use_id` (`None` = coordinator's own turn; set = originated inside a subagent).
+
+**Result - measured run (topic: pasture maintenance, parallel mode, `claude-sonnet-5`):**
+
+```
+Subagent findings extracted: 33
+Synthesis findings extracted: 33
+Findings with (source, publication_date) preserved in synthesis: 33/33
+No findings were dropped or altered.
+```
+
+A clean 33/33 pass - every finding's source and publication date survived the coordinator's merge unchanged. Cost/time for this run: $1.30, 302.92s - notably more than Step 2's Haiku runs, consistent with Sonnet's higher per-token cost and three subagents now each producing structured JSON output rather than free-form prose.
+
+**Caveat flagged, not yet resolved:** a 33/33 match is a good sign but not fully conclusive on its own - it doesn't rule out, for example, the model quietly reusing today's date across many findings instead of genuinely using `null` where a source had no date. The current check verifies the (source, date) pair round-trips unchanged; it does not independently verify that the subagents' *original* dates were themselves faithful to what the source material actually said. Spot-checking a sample of findings by hand is the natural next validation step if this pipeline were to go further.
+
+**Result:** `coordinator.py` now enforces a structured, four-field finding schema across all three subagents and the coordinator's own synthesis, and automatically verifies attribution survives the merge on every run. Supporting file: `docs/pasture_maintenance_notes.md` (real dated local content for `document-analyzer` to extract genuine findings from).
+
+---
+
 *(Step log continues below as further steps are completed)*
